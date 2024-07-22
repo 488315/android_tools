@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+
+"""
+Android Tools - Binary Files Parser and Editor
+
+A collection of utilities for parsing and editing binary files, including searching and replacing patterns. This script is inspired by AdrianDC's advanced_development_shell_tools.
+
+Credits: https://github.com/AdrianDC/advanced_development_shell_tools/blob/master/sources/host/binary.rc
+"""
+
 import os
 import re
 import subprocess
