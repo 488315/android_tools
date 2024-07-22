@@ -9,6 +9,7 @@ from pathlib import Path
 import xmltodict
 import argparse
 import datetime
+from termcolor import colored
 
 def extract_apk_resources(apk_path, output_dir):
     """
@@ -20,10 +21,13 @@ def extract_apk_resources(apk_path, output_dir):
     subprocess.run(["apktool", "d", apk_path, "-o", output_dir], check=True)
     print(f"[INFO] Extracted APK resources to {output_dir}")
 
-def parse_xml(file_path):
+def parse_xml(file_path, index, count):
     """
     Parse an XML file and return its content as a dictionary.
     """
+    clear_line = '\033[K'
+    status_line = f"[{index}/{count}] Parsing XML file: {file_path}{clear_line}\r"
+    print(colored(status_line, 'white', attrs=['bold']), end='\r')
     encodings = ['utf-8', 'ISO-8859-1', 'latin1']
     for enc in encodings:
         try:
@@ -34,10 +38,11 @@ def parse_xml(file_path):
             print(f"[WARN] Error parsing {file_path} with encoding {enc}: {e}")
     return {}
 
-def collect_resources_from_dict(resource_dict):
+def collect_resources_from_dict(resource_dict, index, total_resources):
     """
     Collect string, array, boolean, and integer resources from the parsed resource dictionary.
     """
+    clear_line = '\033[K'
     resources = {}
     if 'resources' in resource_dict:
         res = resource_dict['resources']
@@ -47,9 +52,15 @@ def collect_resources_from_dict(resource_dict):
                 if isinstance(items, list):
                     for item in items:
                         if '@name' in item:
+                            resource_name = item['@name']
+                            status_line = f"[{index}/{total_resources}] processing [{res_type} {resource_name}]{clear_line}"
+                            print(colored(status_line, 'white', attrs=['bold']), end='\r')
                             resources[f"{res_type}:{item['@name']}"] = item.get('#text', '') if res_type in ['string', 'integer'] else item
                 elif isinstance(items, dict):
                     if '@name' in items:
+                        resource_name = items['@name']
+                        status_line = f"[{index}/{total_resources}] processing [{res_type} {resource_name}]{clear_line}"
+                        print(colored(status_line, 'white', attrs=['bold']), end='\r')
                         resources[f"{res_type}:{items['@name']}"] = items.get('#text', '') if res_type in ['string', 'integer'] else items
     return resources
 
@@ -79,11 +90,12 @@ def load_resources(resource_dir):
     Load resources from a directory and return as a dictionary.
     """
     resources = {}
+    xml_files = list(Path(resource_dir).rglob('res/values/*.xml'))
+    total_files = len(xml_files)
 
-    for xml_file in Path(resource_dir).rglob('res/values/*.xml'):
-        print(f"[DEBUG] Parsing XML file: {xml_file}")
-        resource_dict = parse_xml(xml_file)
-        file_resources = collect_resources_from_dict(resource_dict)
+    for index, xml_file in enumerate(xml_files, start=1):
+        resource_dict = parse_xml(xml_file, index, total_files)
+        file_resources = collect_resources_from_dict(resource_dict, index, total_files)
         resources.update(file_resources)
 
     return resources
@@ -110,7 +122,7 @@ def load_defaults(defaults_file):
             defaults.add(f"{res_type}:{name}")
     return defaults
 
-def inject_comments_and_fix_quotes(differences, output_file, aosp_dir):
+def inject_comments_and_fix_quotes(differences, output_file, aosp_dir, silent=False):
     """
     Generate a config.xml file with the differences, injecting comments from the AOSP XML files
     and fixing quotes.
@@ -124,9 +136,13 @@ def inject_comments_and_fix_quotes(differences, output_file, aosp_dir):
         res_type, name = key.split(':')
         grouped_diffs[res_type].append((name, diff))
 
+    total_diffs = sum(len(items) for items in grouped_diffs.values())
+    diff_index = 0
+
     for res_type, items in grouped_diffs.items():
         for name, diff in items:
             item = None
+            diff_index += 1
             if res_type == 'string':
                 item = ET.SubElement(root, res_type, name=name)
                 item.text = str(diff['apk']).replace('&quot;', '"').replace(':::1839:::', '').replace('%1$s :', '').lstrip() if diff['apk'] else ""
@@ -155,7 +171,10 @@ def inject_comments_and_fix_quotes(differences, output_file, aosp_dir):
                         if prev_elem is not None and prev_elem.tag == ET.Comment:
                             comment = ET.Comment(prev_elem.text)
                             root.insert(root.index(item), comment)
-                            print(f"[DEBUG] Injecting comments from: {xml_file}")
+                            if not silent:
+                                status_line = f"[DEBUG] Injecting comments from: {xml_file}"
+                                clear_line = '\033[K'
+                                print(colored(status_line + clear_line, 'white', attrs=['bold']), end='\r')
 
     tree = ET.ElementTree(root)
     with open(output_file, 'wb') as f:
@@ -233,7 +252,7 @@ def main(apk_path, aosp_dir):
 
         output_file = "config.xml"
         print(f"[INFO] Generating {output_file}...")
-        inject_comments_and_fix_quotes(differences, output_file, aosp_dir)
+        inject_comments_and_fix_quotes(differences, output_file, aosp_dir, silent=True)
 
     finally:
         print(f"[INFO] Cleaning up temporary directory {temp_dir}...")
