@@ -18,8 +18,20 @@ def extract_apk_resources(apk_path, output_dir):
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)  # Remove the directory if it exists
 
-    subprocess.run(["apktool", "d", apk_path, "-o", output_dir], check=True)
-    print(f"[INFO] Extracted APK resources to {output_dir}")
+    # Save the original JAVA_OPTS value if it exists
+    original_java_opts = os.environ.get('JAVA_OPTS')
+
+    try:
+        # Set the JAVA_OPTS environment variable to increase the heap size
+        os.environ['JAVA_OPTS'] = "-Xmx2g"
+        subprocess.run(["apktool", "d", apk_path, "-o", output_dir], check=True)
+        print(f"[INFO] Extracted APK resources to {output_dir}")
+    finally:
+        # Restore the original JAVA_OPTS value if it existed
+        if original_java_opts is not None:
+            os.environ['JAVA_OPTS'] = original_java_opts
+        else:
+            del os.environ['JAVA_OPTS']
 
 def parse_xml(file_path, index, count):
     """
