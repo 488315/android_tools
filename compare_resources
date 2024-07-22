@@ -36,26 +36,27 @@ def parse_xml(file_path):
 
 def collect_resources_from_dict(resource_dict):
     """
-    Collect string, array, and boolean resources from the parsed resource dictionary.
+    Collect string, array, boolean, and integer resources from the parsed resource dictionary.
     """
     resources = {}
     if 'resources' in resource_dict:
         res = resource_dict['resources']
-        for res_type in ['string', 'string-array', 'bool']:
+        for res_type in ['string', 'string-array', 'bool', 'integer']:
             if res_type in res:
                 items = res[res_type]
                 if isinstance(items, list):
                     for item in items:
                         if '@name' in item:
-                            resources[f"{res_type}:{item['@name']}"] = item.get('#text', '') if res_type == 'string' else item
+                            resources[f"{res_type}:{item['@name']}"] = item.get('#text', '') if res_type in ['string', 'integer'] else item
                 elif isinstance(items, dict):
                     if '@name' in items:
-                        resources[f"{res_type}:{items['@name']}"] = items.get('#text', '') if res_type == 'string' else items
+                        resources[f"{res_type}:{items['@name']}"] = items.get('#text', '') if res_type in ['string', 'integer'] else items
     return resources
 
 def compare_resources(aosp_resources, apk_resources, defaults):
     """
-    Compare resources from AOSP and APK, and return only differences that are not default values.
+    Compare resources from AOSP and APK, and return only differences that are not default values
+    and resources added by OEMs.
     """
     differences = {}
 
@@ -63,7 +64,12 @@ def compare_resources(aosp_resources, apk_resources, defaults):
     for key in all_keys:
         aosp_value = aosp_resources.get(key)
         apk_value = apk_resources.get(key)
-        if aosp_value != apk_value and (not defaults or key not in defaults):
+
+        # If the resource is added by the OEM (exists only in APK resources), we exclude it
+        if aosp_value is None and apk_value is not None:
+            continue
+        # If the resource exists in both but is different and not a default value, we include it
+        elif aosp_value != apk_value and (not defaults or key not in defaults):
             differences[key] = {'aosp': aosp_value, 'apk': apk_value}
 
     return differences
@@ -113,7 +119,7 @@ def inject_comments_and_fix_quotes(differences, output_file, aosp_dir):
 
     # Sort the differences by key and group them by type
     sorted_diffs = sorted(differences.items(), key=lambda x: x[0])
-    grouped_diffs = {'string': [], 'string-array': [], 'bool': []}
+    grouped_diffs = {'string': [], 'string-array': [], 'bool': [], 'integer': []}
     for key, diff in sorted_diffs:
         res_type, name = key.split(':')
         grouped_diffs[res_type].append((name, diff))
@@ -135,6 +141,9 @@ def inject_comments_and_fix_quotes(differences, output_file, aosp_dir):
             elif res_type == 'bool' and diff['apk']:
                 item = ET.SubElement(root, res_type, name=name)
                 item.text = diff['apk'].get('#text', '') if isinstance(diff['apk'], dict) else str(diff['apk'])
+            elif res_type == 'integer' and diff['apk']:
+                item = ET.SubElement(root, res_type, name=name)
+                item.text = str(diff['apk'])
 
             if item is not None:
                 # Inject comments
