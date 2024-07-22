@@ -67,7 +67,7 @@ def collect_resources_from_dict(resource_dict, index, total_resources):
 def compare_resources(aosp_resources, apk_resources, defaults):
     """
     Compare resources from AOSP and APK, and return only differences that are not default values
-    and resources added by OEMs.
+    and resources added by OEMs. Exclude strings that exist in both AOSP and APK.
     """
     differences = {}
 
@@ -76,9 +76,14 @@ def compare_resources(aosp_resources, apk_resources, defaults):
         aosp_value = aosp_resources.get(key)
         apk_value = apk_resources.get(key)
 
+        # Exclude strings that exist in both AOSP and APK
+        if key.startswith('string:') and aosp_value is not None and apk_value is not None:
+            continue
+
         # If the resource is added by the OEM (exists only in APK resources), we exclude it
         if aosp_value is None and apk_value is not None:
             continue
+
         # If the resource exists in both but is different and not a default value, we include it
         elif aosp_value != apk_value and (not defaults or key not in defaults):
             differences[key] = {'aosp': aosp_value, 'apk': apk_value}
