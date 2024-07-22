@@ -52,13 +52,13 @@ def parse_xml(file_path, index, count):
 
 def collect_resources_from_dict(resource_dict, index, total_resources):
     """
-    Collect string, array, boolean, and integer resources from the parsed resource dictionary.
+    Collect string, array, boolean, integer, and dimen resources from the parsed resource dictionary.
     """
     clear_line = '\033[K'
     resources = {}
     if 'resources' in resource_dict:
         res = resource_dict['resources']
-        for res_type in ['string', 'string-array', 'bool', 'integer']:
+        for res_type in ['string', 'string-array', 'bool', 'integer', 'dimen']:
             if res_type in res:
                 items = res[res_type]
                 if isinstance(items, list):
@@ -67,13 +67,13 @@ def collect_resources_from_dict(resource_dict, index, total_resources):
                             resource_name = item['@name']
                             status_line = f"[{index}/{total_resources}] processing [{res_type} {resource_name}]{clear_line}"
                             print(colored(status_line, 'white', attrs=['bold']), end='\r')
-                            resources[f"{res_type}:{item['@name']}"] = item.get('#text', '') if res_type in ['string', 'integer'] else item
+                            resources[f"{res_type}:{item['@name']}"] = item.get('#text', '') if res_type in ['string', 'integer', 'dimen'] else item
                 elif isinstance(items, dict):
                     if '@name' in items:
                         resource_name = items['@name']
                         status_line = f"[{index}/{total_resources}] processing [{res_type} {resource_name}]{clear_line}"
                         print(colored(status_line, 'white', attrs=['bold']), end='\r')
-                        resources[f"{res_type}:{items['@name']}"] = items.get('#text', '') if res_type in ['string', 'integer'] else items
+                        resources[f"{res_type}:{items['@name']}"] = items.get('#text', '') if res_type in ['string', 'integer', 'dimen'] else items
     return resources
 
 def compare_resources(aosp_resources, apk_resources, defaults):
@@ -138,7 +138,6 @@ def load_defaults(defaults_file):
         if res_type and name:
             defaults.add(f"{res_type}:{name}")
     return defaults
-
 def inject_comments_and_fix_quotes(differences, output_file, aosp_dir, silent=False):
     """
     Generate a config.xml file with the differences, injecting comments from the AOSP XML files
@@ -148,7 +147,7 @@ def inject_comments_and_fix_quotes(differences, output_file, aosp_dir, silent=Fa
 
     # Sort the differences by key and group them by type
     sorted_diffs = sorted(differences.items(), key=lambda x: x[0])
-    grouped_diffs = {'string': [], 'string-array': [], 'bool': [], 'integer': []}
+    grouped_diffs = {'string': [], 'string-array': [], 'bool': [], 'integer': [], 'dimen': []}
     for key, diff in sorted_diffs:
         res_type, name = key.split(':')
         grouped_diffs[res_type].append((name, diff))
@@ -175,6 +174,9 @@ def inject_comments_and_fix_quotes(differences, output_file, aosp_dir, silent=Fa
                 item = ET.SubElement(root, res_type, name=name)
                 item.text = diff['apk'].get('#text', '') if isinstance(diff['apk'], dict) else str(diff['apk'])
             elif res_type == 'integer' and diff['apk']:
+                item = ET.SubElement(root, res_type, name=name)
+                item.text = str(diff['apk'])
+            elif res_type == 'dimen' and diff['apk']:
                 item = ET.SubElement(root, res_type, name=name)
                 item.text = str(diff['apk'])
 
