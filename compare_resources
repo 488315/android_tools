@@ -1,0 +1,240 @@
+#!/usr/bin/env python
+import os
+import shutil
+import subprocess
+import tempfile
+import xml.dom.minidom
+from lxml import etree as ET
+from pathlib import Path
+import xmltodict
+import argparse
+import datetime
+
+def extract_apk_resources(apk_path, output_dir):
+    """
+    Extract resources from the APK using apktool.
+    """
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)  # Remove the directory if it exists
+
+    subprocess.run(["apktool", "d", apk_path, "-o", output_dir], check=True)
+    print(f"[INFO] Extracted APK resources to {output_dir}")
+
+def parse_xml(file_path):
+    """
+    Parse an XML file and return its content as a dictionary.
+    """
+    encodings = ['utf-8', 'ISO-8859-1', 'latin1']
+    for enc in encodings:
+        try:
+            with open(file_path, 'r', encoding=enc) as file:
+                content = file.read()
+            return xmltodict.parse(content, process_namespaces=True)
+        except (UnicodeDecodeError, xmltodict.expat.ExpatError) as e:
+            print(f"[WARN] Error parsing {file_path} with encoding {enc}: {e}")
+    return {}
+
+def collect_resources_from_dict(resource_dict):
+    """
+    Collect string, array, and boolean resources from the parsed resource dictionary.
+    """
+    resources = {}
+    if 'resources' in resource_dict:
+        res = resource_dict['resources']
+        for res_type in ['string', 'string-array', 'bool']:
+            if res_type in res:
+                items = res[res_type]
+                if isinstance(items, list):
+                    for item in items:
+                        if '@name' in item:
+                            resources[f"{res_type}:{item['@name']}"] = item.get('#text', '') if res_type == 'string' else item
+                elif isinstance(items, dict):
+                    if '@name' in items:
+                        resources[f"{res_type}:{items['@name']}"] = items.get('#text', '') if res_type == 'string' else items
+    return resources
+
+def compare_resources(aosp_resources, apk_resources, defaults):
+    """
+    Compare resources from AOSP and APK, and return only differences that are not default values.
+    """
+    differences = {}
+
+    all_keys = set(aosp_resources.keys()).union(set(apk_resources.keys()))
+    for key in all_keys:
+        aosp_value = aosp_resources.get(key)
+        apk_value = apk_resources.get(key)
+        if aosp_value != apk_value and (not defaults or key not in defaults):
+            differences[key] = {'aosp': aosp_value, 'apk': apk_value}
+
+    return differences
+
+def load_resources(resource_dir):
+    """
+    Load resources from a directory and return as a dictionary.
+    """
+    resources = {}
+
+    for xml_file in Path(resource_dir).rglob('res/values/*.xml'):
+        print(f"[DEBUG] Parsing XML file: {xml_file}")
+        resource_dict = parse_xml(xml_file)
+        file_resources = collect_resources_from_dict(resource_dict)
+        resources.update(file_resources)
+
+    return resources
+
+def find_defaults_file(source_dir):
+    """
+    Find the overlayable.xml file in the given source directory.
+    """
+    for xml_file in Path(source_dir).rglob('overlayable.xml'):
+        return xml_file
+    return None
+
+def load_defaults(defaults_file):
+    """
+    Load default values from overlayable.xml.
+    """
+    defaults = set()
+    tree = ET.parse(defaults_file)
+    root = tree.getroot()
+    for item in root.findall('.//item'):
+        res_type = item.attrib.get('type')
+        name = item.attrib.get('name')
+        if res_type and name:
+            defaults.add(f"{res_type}:{name}")
+    return defaults
+
+def inject_comments_and_fix_quotes(differences, output_file, aosp_dir):
+    """
+    Generate a config.xml file with the differences, injecting comments from the AOSP XML files
+    and fixing quotes.
+    """
+    root = ET.Element("resources", xmlns="urn:oasis:names:tc:xliff:document:1.2")
+
+    # Sort the differences by key and group them by type
+    sorted_diffs = sorted(differences.items(), key=lambda x: x[0])
+    grouped_diffs = {'string': [], 'string-array': [], 'bool': []}
+    for key, diff in sorted_diffs:
+        res_type, name = key.split(':')
+        grouped_diffs[res_type].append((name, diff))
+
+    for res_type, items in grouped_diffs.items():
+        for name, diff in items:
+            item = None
+            if res_type == 'string':
+                item = ET.SubElement(root, res_type, name=name)
+                item.text = str(diff['apk']).replace('&quot;', '"').replace(':::1839:::', '').replace('%1$s :', '').lstrip() if diff['apk'] else ""
+            elif res_type == 'string-array' and diff['apk']:
+                item = ET.SubElement(root, res_type, name=name)
+                apk_items = diff['apk'].get('item', [])
+                if not isinstance(apk_items, list):
+                    apk_items = [apk_items]
+                for sub_item in apk_items:
+                    sub_element = ET.SubElement(item, 'item')
+                    sub_element.text = sub_item.get('#text', '').replace(':::1839:::', '').replace('%1$s :', '').lstrip() if isinstance(sub_item, dict) else str(sub_item).replace('&quot;', '"').replace(':::1839:::', '').replace('%1$s :', '').lstrip()
+            elif res_type == 'bool' and diff['apk']:
+                item = ET.SubElement(root, res_type, name=name)
+                item.text = diff['apk'].get('#text', '') if isinstance(diff['apk'], dict) else str(diff['apk'])
+
+            if item is not None:
+                # Inject comments
+                for xml_file in Path(aosp_dir).rglob(f'res/values/*.xml'):
+                    tree = ET.parse(xml_file)
+                    root_aosp = tree.getroot()
+                    for elem in root_aosp.findall(f'.//{res_type}[@name="{name}"]'):
+                        prev_elem = elem.getprevious()
+                        if prev_elem is not None and prev_elem.tag == ET.Comment:
+                            comment = ET.Comment(prev_elem.text)
+                            root.insert(root.index(item), comment)
+                            print(f"[DEBUG] Injecting comments from: {xml_file}")
+
+    tree = ET.ElementTree(root)
+    with open(output_file, 'wb') as f:
+        tree.write(f, encoding='utf-8', xml_declaration=True)
+
+    # Pretty print the XML
+    with open(output_file, 'r', encoding='utf-8') as f:
+        xml_string = f.read()
+    dom = xml.dom.minidom.parseString(xml_string)
+    pretty_xml_as_string = dom.toprettyxml(indent="    ")
+
+    # Add AOSP style comments
+    current_year = datetime.datetime.now().year
+    aosp_comment = f"""<!-- Copyright (C) {current_year} The Android Open Source Project
+
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+
+          http://www.apache.org/licenses/LICENSE-2.0
+
+     Unless required by applicable law or agreed to in writing, software
+     distributed under the License is distributed on an "AS IS" BASIS,
+     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     See the License for the specific language governing permissions and
+     limitations under the License.
+-->
+"""
+
+    pretty_xml_as_string = pretty_xml_as_string.replace('<?xml version="1.0" ?>', f'<?xml version="1.0" encoding="utf-8"?>\n{aosp_comment}')
+
+    # Remove excessive new lines
+    lines = pretty_xml_as_string.split('\n')
+    cleaned_lines = []
+    for i, line in enumerate(lines):
+        if i > 0 and lines[i-1].strip() == '' and line.strip() == '':
+            continue
+        cleaned_lines.append(line)
+
+    pretty_xml_as_string = '\n'.join(cleaned_lines).strip()
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(pretty_xml_as_string)
+    print(f"[INFO] {output_file} generated successfully.")
+
+def main(apk_path, aosp_dir):
+    temp_dir = tempfile.mkdtemp(prefix="random_", dir="/tmp")
+
+    try:
+        print(f"[INFO] Extracting APK resources to {temp_dir}...")
+        extract_apk_resources(apk_path, temp_dir)
+
+        print("[INFO] Loading AOSP resources...")
+        aosp_resources = load_resources(aosp_dir)
+        print(f"[INFO] AOSP resources loaded: {len(aosp_resources)} items")
+
+        print("[INFO] Loading APK resources...")
+        apk_resources = load_resources(temp_dir)
+        print(f"[INFO] APK resources loaded: {len(apk_resources)} items")
+
+        print("[INFO] Finding default values file...")
+        defaults_file = find_defaults_file(aosp_dir)
+
+        if defaults_file:
+            print(f"[INFO] Loading default values from {defaults_file}...")
+            defaults = load_defaults(defaults_file)
+            print(f"[INFO] Default values loaded: {len(defaults)} items")
+        else:
+            print("[WARN] Defaults file (overlayable.xml) not found in the source directory.")
+            defaults = None
+
+        print("[INFO] Comparing resources...")
+        differences = compare_resources(aosp_resources, apk_resources, defaults)
+        print(f"[INFO] Differences found: {len(differences)} items")
+
+        output_file = "config.xml"
+        print(f"[INFO] Generating {output_file}...")
+        inject_comments_and_fix_quotes(differences, output_file, aosp_dir)
+
+    finally:
+        print(f"[INFO] Cleaning up temporary directory {temp_dir}...")
+        shutil.rmtree(temp_dir)
+        print("[INFO] Cleanup completed.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Compare AOSP resources with APK resources.")
+    parser.add_argument("--apk_dir", required=True, help="Directory containing the APK file.")
+    parser.add_argument("--source_dir", required=True, help="Source directory containing AOSP resources.")
+
+    args = parser.parse_args()
+    main(args.apk_dir, args.source_dir)
