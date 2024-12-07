@@ -243,8 +243,82 @@ def remove_extra_resources(aosp_resources, apk_resources, output_file):
 
     logging.info(f"Generated cleaned config.xml with only AOSP resources: {output_file}")
 
+def extract_package_name(apk_dir):
+    """
+    Extract the package name from the decoded AndroidManifest.xml.
+    """
+    manifest_path = Path(apk_dir) / "AndroidManifest.xml"
+    if not manifest_path.exists():
+        logging.error(f"AndroidManifest.xml not found in {apk_dir}")
+        exit(1)
 
-def main(apk_dir, source_dir, output_file="config.xml", cleaned_file="config.xml"):
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+        package_name = root.attrib.get("package")
+        if not package_name:
+            logging.error("Package name not found in AndroidManifest.xml")
+            exit(1)
+        return package_name
+    except Exception as e:
+        logging.error(f"Error parsing AndroidManifest.xml: {e}")
+        exit(1)
+
+def generate_android_bp(overlay_dir, overlay_name):
+    """
+    Generate an Android.bp file for the RRO overlay.
+    """
+    android_bp_content = f"""// This Android.bp is auto-generated for the overlay package {overlay_name}
+rro_package {{
+    name: "{overlay_name}",
+    certificate: "platform",
+    visibility: ["//visibility:public"],
+    resources: ["res"],
+    package_name: "{overlay_name}",
+}}
+"""
+    with open(overlay_dir / "Android.bp", "w", encoding="utf-8") as f:
+        f.write(android_bp_content)
+
+    logging.info(f"Generated Android.bp for overlay: {overlay_name}")
+
+
+def generate_rro_overlay(apk_dir, overlay_name, cleaned_file, output_dir):
+    """
+    Generate an RRO overlay with the given overlay name and package name from the APK.
+    """
+    # Extract package name from the APK's AndroidManifest.xml
+    package_name = extract_package_name(apk_dir)
+
+    # Create RRO overlay directory structure
+    overlay_dir = Path(output_dir) / overlay_name
+    res_dir = overlay_dir / "res"
+    values_dir = res_dir / "values"
+    values_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write the cleaned XML as the overlay's resource file
+    shutil.copy(cleaned_file, values_dir / "config.xml")
+
+    # Generate AndroidManifest.xml for the overlay
+    manifest_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{overlay_name}">
+    <overlay android:targetPackage="{package_name}"
+             android:priority="1"
+             android:isStatic="true" />
+</manifest>
+"""
+    with open(overlay_dir / "AndroidManifest.xml", "w", encoding="utf-8") as f:
+        f.write(manifest_content)
+
+    logging.info(f"Generated AndroidManifest.xml for overlay: {overlay_name}")
+
+    # Generate Android.bp
+    generate_android_bp(overlay_dir, overlay_name)
+
+
+
+def main(apk_dir, source_dir, output_file="config.xml", cleaned_file="cleaned_config.xml", rro_overlay=None, output_dir="rro_output"):
     check_dependencies()
     validate_directories(apk_dir, source_dir)
 
@@ -269,16 +343,23 @@ def main(apk_dir, source_dir, output_file="config.xml", cleaned_file="config.xml
         logging.info("Cleaning up Extra Resources...")
         remove_extra_resources(aosp_resources, apk_resources, cleaned_file)
 
+        if rro_overlay:
+            logging.info(f"Generating RRO overlay '{rro_overlay}'...")
+            generate_rro_overlay(temp_dir, rro_overlay, cleaned_file, output_dir)
+
     finally:
         shutil.rmtree(temp_dir)
         logging.info("Cleaned up temporary files.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compare AOSP resources with APK resources.")
+    parser = argparse.ArgumentParser(description="Compare AOSP resources with APK resources and generate RRO overlay.")
     parser.add_argument("--apk_dir", required=True, help="Path to the APK directory.")
     parser.add_argument("--source_dir", required=True, help="Path to the AOSP source directory.")
     parser.add_argument("--output", default="config.xml", help="Output file for differences (default: config.xml).")
+    parser.add_argument("--cleaned_output", default="cleaned_config.xml", help="Output file for cleaned AOSP resources.")
+    parser.add_argument("--rro_overlay", help="Name of the RRO overlay to generate.")
+    parser.add_argument("--output_dir", default="rro_output", help="Directory to store the generated RRO overlay.")
 
     args = parser.parse_args()
-    main(args.apk_dir, args.source_dir, args.output)
+    main(args.apk_dir, args.source_dir, args.output, args.cleaned_output, args.rro_overlay, args.output_dir)
